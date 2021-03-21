@@ -1,0 +1,1075 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Задача\n",
+    "---\n",
+    "Вам необходимо предсказать, есть ли в объявлении контактная информация.\n",
+    "\n",
+    "Для обучения у вас есть следующие поля:\n",
+    "* `title` - заголовок,\n",
+    "* `description` - описание,\n",
+    "* `subcategory` - подкатегория,\n",
+    "* `category` - категория,\n",
+    "* `price` - цена,\n",
+    "* `region` - регион,\n",
+    "* `city` - город,\n",
+    "* `datetime_submitted` - дата размещения.\n",
+    "\n",
+    "Таргет: `is_bad`\n",
+    "\n",
+    "Есть два датасета `train.csv` и `val.csv`: `train.csv` содержит больше данных, однако разметка в нём менее точная; в `val.csv` существенно меньше данных, но более точная разметка.\n",
+    "Тестовый датасет, на котором мы оценим решнение, будет больше похож на `val.csv`.\n",
+    "При этом в датасетах могут встречаться (как и, к сожалению, в любых размечаемых данных) некорректные метки.\n",
+    "\n",
+    "Данные находятся по ссылке https://drive.google.com/drive/folders/1anZ1bxi5WhPmBlCBnYBYzo4foSgGSee5?usp=sharing. \n",
+    "\n",
+    "Во время запуска вашего решения файл с тестовыми данными будет располагаться по пути `/task-for-hiring-data/test_data.csv`\n",
+    "\n",
+    "Файл с результатом работы модели должен представлять из себя `csv` с колонками:\n",
+    "* `index`: `int`, положение записи в файле;\n",
+    "* `prediction`: `float` от 0 до 1, вероятность того, что в объявлении есть контактная информация.\n",
+    "\n",
+    "|index  |prediction|\n",
+    "|-------|----------|\n",
+    "|0|0.12|\n",
+    "|1|0.95|\n",
+    "|...|...|\n",
+    "|N|0.68|\n",
+    "\n",
+    "После отрабатывания скрипта `run.py` должен записаться csv-файл `/task-for-hiring-data/target_prediction.csv`.\n",
+    "\n",
+    "В качестве метрики качества работы вашей модели мы будем использовать усредненный `ROC-AUC` по каждой категории объявлений.\n",
+    "\n",
+    "Также есть задача \"со звездочкой\": предсказать начало и конец контактной информации в описании объявления. Например:\n",
+    "* для строки `Звоните на +7-888-888-88-88, в объявлении некорректный номер`: (11, 26),\n",
+    "* для строки `Звоните на +7-888aaaaa888aaaa88a88, в объявлении некорректный номер`: (11, 33),\n",
+    "* для строки `мой tg: @ivanicki_i на звонки не отвечаю`: (8, 18),\n",
+    "* для строки `мой tg: ivanicki_i на звонки не отвечаю`: (8, 17),\n",
+    "* если в описании объявления (поле `description`) контактов нет, то (None, None)\n",
+    "* если в описании объявления (поле `description`) более одного контакта (`Звоните не 89990000000 или на 89991111111`), то (None, None).\n",
+    "\n",
+    "Файл с результатом работы модели должен представлять из себя `csv` с колонками:\n",
+    "* `index`: `int`, положение записи в файле;\n",
+    "* `start`: `int` or `None`, начало маски контакта;\n",
+    "* `end`: `int` or `None`, конец маски контакта.\\\n",
+    "(`start` < `end`)\n",
+    "\n",
+    "|index  |start|end|\n",
+    "|-------|----------|-----|\n",
+    "|0|None|None|\n",
+    "|1|0|23\n",
+    "|2|31|123\n",
+    "|...|...|\n",
+    "|N|None|None\n",
+    "\n",
+    "После отрабатывания скрипта `run.py` должен записаться csv-файл `/task-for-hiring-data/mask_prediction.csv`.\n",
+    "\n",
+    "Для задачи со звездочкой метрикой будет усредненный IoU (`Intersection over Union`) по текстам объявлений.\n",
+    "\n",
+    "У контейнера не будет доступа в интернет.\n",
+    "Вы можете добавить нужные библиотеки в файл `requirements.txt` или напрямую в `Dockerfile`.\n",
+    "\n",
+    "Сделайте форк этого репозитория, а в качестве решения пришлите ссылку на вашу ветку\n",
+    "\n",
+    "Удачи :)\n",
+    "\n",
+    "# Запуск решения\n",
+    "1. Docker-образ будет собираться командой:\\\n",
+    "```docker build -t task_for_hiring -f Dockerfile .```\n",
+    "2. Далее контейнер будет запускаться:\\\n",
+    "```docker run -it -v ~/main/task-for-hiring-data:/task-for-hiring-data task_for_hiring python lib/run.py```\n",
+    "3. Файлы с полученным предсказанием должны находиться по тому же пути, что и в тестовом варианте скрипта `lib/run.py`\n",
+    "\n",
+    "Обратите внимание, что в контейнере по умолчанию используется python3:\n",
+    "\n",
+    "```docker run -it task_for_hiring python -c \"import sys; print(sys.version)\"```\n",
+    "> 3.7.3 (default, Mar 27 2019, 22:11:17)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "\n",
+    "from sklearn.linear_model import LogisticRegression\n",
+    "# from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier\n",
+    "from sklearn.metrics import accuracy_score, roc_auc_score\n",
+    "from sklearn.model_selection import GridSearchCV\n",
+    "from sklearn.feature_extraction.text import TfidfVectorizer\n",
+    "from sklearn.feature_extraction import DictVectorizer\n",
+    "from scipy.sparse import hstack"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(984487, 9)"
+      ]
+     },
+     "execution_count": 2,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "train = pd.read_csv('train.csv')\n",
+    "train.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>title</th>\n",
+       "      <th>description</th>\n",
+       "      <th>subcategory</th>\n",
+       "      <th>category</th>\n",
+       "      <th>price</th>\n",
+       "      <th>region</th>\n",
+       "      <th>city</th>\n",
+       "      <th>datetime_submitted</th>\n",
+       "      <th>is_bad</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>Диван-кровать</td>\n",
+       "      <td>Продаем диван-кровать. Удобный механизм - евро...</td>\n",
+       "      <td>Мебель и интерьер</td>\n",
+       "      <td>Для дома и дачи</td>\n",
+       "      <td>7000.0</td>\n",
+       "      <td>Россия</td>\n",
+       "      <td>Москва</td>\n",
+       "      <td>2019-06-01 00:00:15.180656</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>Кожух рулевой колонки Даф хф 91 4509834</td>\n",
+       "      <td>Кожух рулевой колонки DAF XF 94 (60066004)/\\n ...</td>\n",
+       "      <td>Запчасти и аксессуары</td>\n",
+       "      <td>Транспорт</td>\n",
+       "      <td>2290.0</td>\n",
+       "      <td>Россия</td>\n",
+       "      <td>Москва</td>\n",
+       "      <td>2019-06-01 00:00:44.317933</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>Дешёвый буст аккаунтов Dota 4</td>\n",
+       "      <td>! Буст аккаунтов с ммр выше 1000ммр не беру ! ...</td>\n",
+       "      <td>Предложение услуг</td>\n",
+       "      <td>Услуги</td>\n",
+       "      <td>200.0</td>\n",
+       "      <td>Северная Осетия</td>\n",
+       "      <td>Владикавказ</td>\n",
+       "      <td>2019-06-01 00:00:50.249692</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>Телевизор sharp.Смарт тв.Интернет</td>\n",
+       "      <td>Продам телевизор . Диагональ 450.наличие входа...</td>\n",
+       "      <td>Аудио и видео</td>\n",
+       "      <td>Бытовая электроника</td>\n",
+       "      <td>25000.0</td>\n",
+       "      <td>Калининградская область</td>\n",
+       "      <td>Советск</td>\n",
+       "      <td>2019-06-01 00:00:50.325799</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>Открытка-конверт</td>\n",
+       "      <td>Открытки-конверты ручной работы/\\nВыполнены в ...</td>\n",
+       "      <td>Коллекционирование</td>\n",
+       "      <td>Хобби и отдых</td>\n",
+       "      <td>150.0</td>\n",
+       "      <td>Ставропольский край</td>\n",
+       "      <td>Ессентукская</td>\n",
+       "      <td>2019-06-01 00:00:56.632655</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                     title  \\\n",
+       "0                            Диван-кровать   \n",
+       "1  Кожух рулевой колонки Даф хф 91 4509834   \n",
+       "2            Дешёвый буст аккаунтов Dota 4   \n",
+       "3        Телевизор sharp.Смарт тв.Интернет   \n",
+       "4                         Открытка-конверт   \n",
+       "\n",
+       "                                         description            subcategory  \\\n",
+       "0  Продаем диван-кровать. Удобный механизм - евро...      Мебель и интерьер   \n",
+       "1  Кожух рулевой колонки DAF XF 94 (60066004)/\\n ...  Запчасти и аксессуары   \n",
+       "2  ! Буст аккаунтов с ммр выше 1000ммр не беру ! ...      Предложение услуг   \n",
+       "3  Продам телевизор . Диагональ 450.наличие входа...          Аудио и видео   \n",
+       "4  Открытки-конверты ручной работы/\\nВыполнены в ...     Коллекционирование   \n",
+       "\n",
+       "              category    price                   region          city  \\\n",
+       "0      Для дома и дачи   7000.0                   Россия        Москва   \n",
+       "1            Транспорт   2290.0                   Россия        Москва   \n",
+       "2               Услуги    200.0          Северная Осетия   Владикавказ   \n",
+       "3  Бытовая электроника  25000.0  Калининградская область       Советск   \n",
+       "4        Хобби и отдых    150.0      Ставропольский край  Ессентукская   \n",
+       "\n",
+       "           datetime_submitted  is_bad  \n",
+       "0  2019-06-01 00:00:15.180656       0  \n",
+       "1  2019-06-01 00:00:44.317933       0  \n",
+       "2  2019-06-01 00:00:50.249692       1  \n",
+       "3  2019-06-01 00:00:50.325799       1  \n",
+       "4  2019-06-01 00:00:56.632655       0  "
+      ]
+     },
+     "execution_count": 3,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "train.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "(16237, 9)"
+      ]
+     },
+     "execution_count": 4,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "val = pd.read_csv('val.csv')\n",
+    "val.shape"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>title</th>\n",
+       "      <th>description</th>\n",
+       "      <th>subcategory</th>\n",
+       "      <th>category</th>\n",
+       "      <th>price</th>\n",
+       "      <th>region</th>\n",
+       "      <th>city</th>\n",
+       "      <th>datetime_submitted</th>\n",
+       "      <th>is_bad</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>Шины</td>\n",
+       "      <td>Звонить 89425546881</td>\n",
+       "      <td>Запчасти и аксессуары</td>\n",
+       "      <td>Транспорт</td>\n",
+       "      <td>2000.0</td>\n",
+       "      <td>Тульская область</td>\n",
+       "      <td>Огаревка</td>\n",
+       "      <td>2019-10-10 00:00:25.200714</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>Продается мобильная перегородка с дверью</td>\n",
+       "      <td>Мобильная перегородка, предназначена для разгр...</td>\n",
+       "      <td>Оборудование для бизнеса</td>\n",
+       "      <td>Для бизнеса</td>\n",
+       "      <td>10500.0</td>\n",
+       "      <td>Вологодская область</td>\n",
+       "      <td>Вологда</td>\n",
+       "      <td>2019-10-10 00:03:11.527292</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>Комплект зимних шин на дисках 682/32/64</td>\n",
+       "      <td>Шины зимние б/у Marshal Assimetric I”Zen KW 61...</td>\n",
+       "      <td>Запчасти и аксессуары</td>\n",
+       "      <td>Транспорт</td>\n",
+       "      <td>4000.0</td>\n",
+       "      <td>Россия</td>\n",
+       "      <td>Москва</td>\n",
+       "      <td>2019-10-10 00:05:07.193248</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>Кровать-трансормер Дакота сб-4085</td>\n",
+       "      <td>Продаю кровать-трансформер производства \"Столп...</td>\n",
+       "      <td>Мебель и интерьер</td>\n",
+       "      <td>Для дома и дачи</td>\n",
+       "      <td>17000.0</td>\n",
+       "      <td>Московская область</td>\n",
+       "      <td>Химки</td>\n",
+       "      <td>2019-10-10 00:05:58.165179</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>Honda VFR 800 2004 г.в</td>\n",
+       "      <td>Мот в отличном состоянии для своих лет, Родной...</td>\n",
+       "      <td>Мотоциклы и мототехника</td>\n",
+       "      <td>Транспорт</td>\n",
+       "      <td>235000.0</td>\n",
+       "      <td>Брянская область</td>\n",
+       "      <td>Брянск</td>\n",
+       "      <td>2019-10-10 00:06:19.231151</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                      title  \\\n",
+       "0                                      Шины   \n",
+       "1  Продается мобильная перегородка с дверью   \n",
+       "2   Комплект зимних шин на дисках 682/32/64   \n",
+       "3         Кровать-трансормер Дакота сб-4085   \n",
+       "4                    Honda VFR 800 2004 г.в   \n",
+       "\n",
+       "                                         description  \\\n",
+       "0                                Звонить 89425546881   \n",
+       "1  Мобильная перегородка, предназначена для разгр...   \n",
+       "2  Шины зимние б/у Marshal Assimetric I”Zen KW 61...   \n",
+       "3  Продаю кровать-трансформер производства \"Столп...   \n",
+       "4  Мот в отличном состоянии для своих лет, Родной...   \n",
+       "\n",
+       "                subcategory         category     price               region  \\\n",
+       "0     Запчасти и аксессуары        Транспорт    2000.0     Тульская область   \n",
+       "1  Оборудование для бизнеса      Для бизнеса   10500.0  Вологодская область   \n",
+       "2     Запчасти и аксессуары        Транспорт    4000.0               Россия   \n",
+       "3         Мебель и интерьер  Для дома и дачи   17000.0   Московская область   \n",
+       "4   Мотоциклы и мототехника        Транспорт  235000.0     Брянская область   \n",
+       "\n",
+       "       city          datetime_submitted  is_bad  \n",
+       "0  Огаревка  2019-10-10 00:00:25.200714       1  \n",
+       "1   Вологда  2019-10-10 00:03:11.527292       0  \n",
+       "2    Москва  2019-10-10 00:05:07.193248       1  \n",
+       "3     Химки  2019-10-10 00:05:58.165179       0  \n",
+       "4    Брянск  2019-10-10 00:06:19.231151       0  "
+      ]
+     },
+     "execution_count": 5,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "val.head()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## TF-IDF / One Hot Encoding"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "train['description'] = train['description'].replace(r'[\\W_]+', ' ', regex = True).str.lower()\n",
+    "val['description'] = val['description'].replace(r'[\\W_]+', ' ', regex = True).str.lower()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>title</th>\n",
+       "      <th>description</th>\n",
+       "      <th>subcategory</th>\n",
+       "      <th>category</th>\n",
+       "      <th>price</th>\n",
+       "      <th>region</th>\n",
+       "      <th>city</th>\n",
+       "      <th>datetime_submitted</th>\n",
+       "      <th>is_bad</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>Диван-кровать</td>\n",
+       "      <td>продаем диван кровать удобный механизм еврокни...</td>\n",
+       "      <td>Мебель и интерьер</td>\n",
+       "      <td>Для дома и дачи</td>\n",
+       "      <td>7000.0</td>\n",
+       "      <td>Россия</td>\n",
+       "      <td>Москва</td>\n",
+       "      <td>2019-06-01 00:00:15.180656</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>Кожух рулевой колонки Даф хф 91 4509834</td>\n",
+       "      <td>кожух рулевой колонки daf xf 94 60066004 артик...</td>\n",
+       "      <td>Запчасти и аксессуары</td>\n",
+       "      <td>Транспорт</td>\n",
+       "      <td>2290.0</td>\n",
+       "      <td>Россия</td>\n",
+       "      <td>Москва</td>\n",
+       "      <td>2019-06-01 00:00:44.317933</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>Дешёвый буст аккаунтов Dota 4</td>\n",
+       "      <td>буст аккаунтов с ммр выше 1000ммр не беру отв...</td>\n",
+       "      <td>Предложение услуг</td>\n",
+       "      <td>Услуги</td>\n",
+       "      <td>200.0</td>\n",
+       "      <td>Северная Осетия</td>\n",
+       "      <td>Владикавказ</td>\n",
+       "      <td>2019-06-01 00:00:50.249692</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>Телевизор sharp.Смарт тв.Интернет</td>\n",
+       "      <td>продам телевизор диагональ 450 наличие входа u...</td>\n",
+       "      <td>Аудио и видео</td>\n",
+       "      <td>Бытовая электроника</td>\n",
+       "      <td>25000.0</td>\n",
+       "      <td>Калининградская область</td>\n",
+       "      <td>Советск</td>\n",
+       "      <td>2019-06-01 00:00:50.325799</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>Открытка-конверт</td>\n",
+       "      <td>открытки конверты ручной работы выполнены в те...</td>\n",
+       "      <td>Коллекционирование</td>\n",
+       "      <td>Хобби и отдых</td>\n",
+       "      <td>150.0</td>\n",
+       "      <td>Ставропольский край</td>\n",
+       "      <td>Ессентукская</td>\n",
+       "      <td>2019-06-01 00:00:56.632655</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                     title  \\\n",
+       "0                            Диван-кровать   \n",
+       "1  Кожух рулевой колонки Даф хф 91 4509834   \n",
+       "2            Дешёвый буст аккаунтов Dota 4   \n",
+       "3        Телевизор sharp.Смарт тв.Интернет   \n",
+       "4                         Открытка-конверт   \n",
+       "\n",
+       "                                         description            subcategory  \\\n",
+       "0  продаем диван кровать удобный механизм еврокни...      Мебель и интерьер   \n",
+       "1  кожух рулевой колонки daf xf 94 60066004 артик...  Запчасти и аксессуары   \n",
+       "2   буст аккаунтов с ммр выше 1000ммр не беру отв...      Предложение услуг   \n",
+       "3  продам телевизор диагональ 450 наличие входа u...          Аудио и видео   \n",
+       "4  открытки конверты ручной работы выполнены в те...     Коллекционирование   \n",
+       "\n",
+       "              category    price                   region          city  \\\n",
+       "0      Для дома и дачи   7000.0                   Россия        Москва   \n",
+       "1            Транспорт   2290.0                   Россия        Москва   \n",
+       "2               Услуги    200.0          Северная Осетия   Владикавказ   \n",
+       "3  Бытовая электроника  25000.0  Калининградская область       Советск   \n",
+       "4        Хобби и отдых    150.0      Ставропольский край  Ессентукская   \n",
+       "\n",
+       "           datetime_submitted  is_bad  \n",
+       "0  2019-06-01 00:00:15.180656       0  \n",
+       "1  2019-06-01 00:00:44.317933       0  \n",
+       "2  2019-06-01 00:00:50.249692       1  \n",
+       "3  2019-06-01 00:00:50.325799       1  \n",
+       "4  2019-06-01 00:00:56.632655       0  "
+      ]
+     },
+     "execution_count": 7,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "train.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 8,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>title</th>\n",
+       "      <th>description</th>\n",
+       "      <th>subcategory</th>\n",
+       "      <th>category</th>\n",
+       "      <th>price</th>\n",
+       "      <th>region</th>\n",
+       "      <th>city</th>\n",
+       "      <th>datetime_submitted</th>\n",
+       "      <th>is_bad</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>Шины</td>\n",
+       "      <td>звонить 89425546881</td>\n",
+       "      <td>Запчасти и аксессуары</td>\n",
+       "      <td>Транспорт</td>\n",
+       "      <td>2000.0</td>\n",
+       "      <td>Тульская область</td>\n",
+       "      <td>Огаревка</td>\n",
+       "      <td>2019-10-10 00:00:25.200714</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>Продается мобильная перегородка с дверью</td>\n",
+       "      <td>мобильная перегородка предназначена для разгра...</td>\n",
+       "      <td>Оборудование для бизнеса</td>\n",
+       "      <td>Для бизнеса</td>\n",
+       "      <td>10500.0</td>\n",
+       "      <td>Вологодская область</td>\n",
+       "      <td>Вологда</td>\n",
+       "      <td>2019-10-10 00:03:11.527292</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>Комплект зимних шин на дисках 682/32/64</td>\n",
+       "      <td>шины зимние б у marshal assimetric i zen kw 61...</td>\n",
+       "      <td>Запчасти и аксессуары</td>\n",
+       "      <td>Транспорт</td>\n",
+       "      <td>4000.0</td>\n",
+       "      <td>Россия</td>\n",
+       "      <td>Москва</td>\n",
+       "      <td>2019-10-10 00:05:07.193248</td>\n",
+       "      <td>1</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>Кровать-трансормер Дакота сб-4085</td>\n",
+       "      <td>продаю кровать трансформер производства столпл...</td>\n",
+       "      <td>Мебель и интерьер</td>\n",
+       "      <td>Для дома и дачи</td>\n",
+       "      <td>17000.0</td>\n",
+       "      <td>Московская область</td>\n",
+       "      <td>Химки</td>\n",
+       "      <td>2019-10-10 00:05:58.165179</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>Honda VFR 800 2004 г.в</td>\n",
+       "      <td>мот в отличном состоянии для своих лет родной ...</td>\n",
+       "      <td>Мотоциклы и мототехника</td>\n",
+       "      <td>Транспорт</td>\n",
+       "      <td>235000.0</td>\n",
+       "      <td>Брянская область</td>\n",
+       "      <td>Брянск</td>\n",
+       "      <td>2019-10-10 00:06:19.231151</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                      title  \\\n",
+       "0                                      Шины   \n",
+       "1  Продается мобильная перегородка с дверью   \n",
+       "2   Комплект зимних шин на дисках 682/32/64   \n",
+       "3         Кровать-трансормер Дакота сб-4085   \n",
+       "4                    Honda VFR 800 2004 г.в   \n",
+       "\n",
+       "                                         description  \\\n",
+       "0                                звонить 89425546881   \n",
+       "1  мобильная перегородка предназначена для разгра...   \n",
+       "2  шины зимние б у marshal assimetric i zen kw 61...   \n",
+       "3  продаю кровать трансформер производства столпл...   \n",
+       "4  мот в отличном состоянии для своих лет родной ...   \n",
+       "\n",
+       "                subcategory         category     price               region  \\\n",
+       "0     Запчасти и аксессуары        Транспорт    2000.0     Тульская область   \n",
+       "1  Оборудование для бизнеса      Для бизнеса   10500.0  Вологодская область   \n",
+       "2     Запчасти и аксессуары        Транспорт    4000.0               Россия   \n",
+       "3         Мебель и интерьер  Для дома и дачи   17000.0   Московская область   \n",
+       "4   Мотоциклы и мототехника        Транспорт  235000.0     Брянская область   \n",
+       "\n",
+       "       city          datetime_submitted  is_bad  \n",
+       "0  Огаревка  2019-10-10 00:00:25.200714       1  \n",
+       "1   Вологда  2019-10-10 00:03:11.527292       0  \n",
+       "2    Москва  2019-10-10 00:05:07.193248       1  \n",
+       "3     Химки  2019-10-10 00:05:58.165179       0  \n",
+       "4    Брянск  2019-10-10 00:06:19.231151       0  "
+      ]
+     },
+     "execution_count": 8,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "val.head()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# train[train['is_bad'] == 1]['description'].iloc[7]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# for i in range(train.shape[1]):\n",
+    "#     print(np.sum(train.iloc[:, i].isnull()))\n",
+    "\n",
+    "# for i in range(val.shape[1]):\n",
+    "#     print(np.sum(val.iloc[:, i].isnull()))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 9,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# leave only those words that are found in at least 5 objects\n",
+    "vectorizer = TfidfVectorizer(min_df = 5)\n",
+    "\n",
+    "# count tf-idf for description\n",
+    "tf_idf_train = vectorizer.fit_transform(train['description'])\n",
+    "tf_idf_val = vectorizer.transform(val['description'])"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 10,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "one_hot = DictVectorizer()\n",
+    "categories = ['subcategory', 'category' , 'region', 'city']\n",
+    "\n",
+    "# one hot transformation for text fields\n",
+    "X_train_categ = one_hot.fit_transform(train[categories].to_dict('records'))\n",
+    "X_val_categ = one_hot.transform(val[categories].to_dict('records'))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 11,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "The shape of train data after encoding: (984487, 253680)\n"
+     ]
+    }
+   ],
+   "source": [
+    "X_train = hstack([tf_idf_train, X_train_categ])\n",
+    "y_train = train['is_bad']\n",
+    "print('The shape of train data after encoding:', X_train.shape)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "*Кажется, использовать деревья решений (например, `RandomForest` или `GradientBoosting`)  для такого количества признаков здесь не удасться. Только если попробовать сделать лемматизацию или embedding. Поэтому как выход остается использовать линейные методы.*"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 12,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "X_val = hstack([tf_idf_val, X_val_categ])\n",
+    "y_val = val['is_bad']"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## LogisticRegression"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "*Закомментировал, т.к. поиск лучших парметров занимает достаточно долгое время. Поэтому оставил только результат.*"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# estimator = LogisticRegression()\n",
+    "# param_grid = {'C': [0.01, 0.03, 0.1, 0.3, 1, 3, 10]}\n",
+    "\n",
+    "# grid_cv = GridSearchCV(estimator, param_grid, cv = 3)\n",
+    "\n",
+    "# grid_cv.fit(X_train, y_train)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# grid_cv.best_estimator_"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Result: \n",
+    "\n",
+    "```python\n",
+    "LogisticRegression(C=3, class_weight=None, dual=False, fit_intercept=True,\n",
+    "          intercept_scaling=1, max_iter=100, multi_class='warn',\n",
+    "          n_jobs=None, penalty='l2', random_state=None, solver='warn',\n",
+    "          tol=0.0001, verbose=0, warm_start=False)\n",
+    "```"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# grid_cv.best_score_"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 13,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "lr_clf = LogisticRegression(C=3, class_weight=None, dual=False, fit_intercept=True,\n",
+    "          intercept_scaling=1, max_iter=100, multi_class='warn',\n",
+    "          n_jobs=None, penalty='l2', random_state=None, solver='warn',\n",
+    "          tol=0.0001, verbose=0, warm_start=False)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 14,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stderr",
+     "output_type": "stream",
+     "text": [
+      "C:\\ProgramData\\Anaconda3\\lib\\site-packages\\sklearn\\linear_model\\logistic.py:433: FutureWarning: Default solver will be changed to 'lbfgs' in 0.22. Specify a solver to silence this warning.\n",
+      "  FutureWarning)\n"
+     ]
+    },
+    {
+     "data": {
+      "text/plain": [
+       "LogisticRegression(C=3, class_weight=None, dual=False, fit_intercept=True,\n",
+       "          intercept_scaling=1, max_iter=100, multi_class='warn',\n",
+       "          n_jobs=None, penalty='l2', random_state=None, solver='warn',\n",
+       "          tol=0.0001, verbose=0, warm_start=False)"
+      ]
+     },
+     "execution_count": 14,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "lr_clf.fit(X_train, y_train)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 15,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "0.9306603337575814"
+      ]
+     },
+     "execution_count": 15,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "accuracy_score(y_train, lr_clf.predict(X_train))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 16,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Accuracy score for val data using LogReg: 0.890250662068116\n"
+     ]
+    }
+   ],
+   "source": [
+    "y_pred = lr_clf.predict(X_val)\n",
+    "accuracy = accuracy_score(y_val, y_pred)\n",
+    "print('Accuracy score for val data using LogReg:', accuracy)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 17,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "ROC_AUC score for val data using LogReg: 0.9343201498731245\n"
+     ]
+    }
+   ],
+   "source": [
+    "y_pred_proba = lr_clf.predict_proba(X_val)[:, 1]\n",
+    "roc_auc = roc_auc_score(y_val, y_pred_proba)\n",
+    "print('ROC_AUC score for val data using LogReg:', roc_auc)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Test "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "*Для тестовых данных используем тот классификатор, который показал наилучший результат на val данных.  На данный момент удалось обучить лучше всего только с `LogisticRegression`.*"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "best_clf = lr_clf"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# here is your test file (откорректируйте, пожалуйста, расположение файла, если я указал неверно)\n",
+    "test = pd.read_csv('/task-for-hiring-data/test_data.csv')\n",
+    "\n",
+    "test['description'] = test['description'].replace(r'[\\W_]+', ' ', regex = True).str.lower()\n",
+    "tf_idf_test = vectorizer.transform(test['description'])\n",
+    "X_test_categ = one_hot.transform(test[categories].to_dict('records'))\n",
+    "\n",
+    "X_test = hstack([tf_idf_test, X_test_categ])\n",
+    "y_test = test['is_bad']\n",
+    "\n",
+    "y_test_pred = best_clf.predict(X_test)\n",
+    "accuracy = accuracy_score(y_test, y_test_pred)\n",
+    "print('Accuracy score for test data using best classifier:', accuracy)\n",
+    "\n",
+    "y_test_pred_proba = best_clf.predict_proba(X_test)[:, 1]\n",
+    "roc_auc = roc_auc_score(y_test, y_test_pred_proba)\n",
+    "print('ROC_AUC score for test data using best classifier:', roc_auc)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "target_prediction = pd.DataFrame()\n",
+    "target_prediction['index'] = range(test.shape[0])\n",
+    "target_prediction['prediction'] = y_test_pred_proba\n",
+    "\n",
+    "target_prediction.to_csv('/task-for-hiring-data/target_prediction.csv', index=False)\n",
+    "# pd.read_csv('/task-for-hiring-data/target_prediction.csv').head(10)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "В случае если не удасться проверить решение на тестовых данных или результат будет ниже порогового $-$ сообщите, пожалуйста.\n",
+    "\n",
+    "*Мой телефон:* +79031648555\n",
+    "\n",
+    "*telegram:* @mlunov"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.7.3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
